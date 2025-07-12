@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use log::{info, error, debug};
 
 use crate::error::{EpcError, EpcResult};
-use crate::protocol::{EpcConnection, MethodHandler};
+use crate::protocol::MethodHandler;
 use crate::types::EpcValue;
 
 pub struct EpcServer {
@@ -26,7 +26,7 @@ impl EpcServer {
     
     /// Create a new EPC server on localhost with OS-assigned port
     pub async fn new() -> EpcResult<Self> {
-        Self::bind("localhost:0").await
+        Self::bind("127.0.0.1:0").await
     }
     
     /// Get the local address the server is bound to
@@ -79,34 +79,9 @@ impl EpcServer {
         stream: TcpStream,
         methods: Arc<std::sync::Mutex<HashMap<String, MethodHandler>>>,
     ) -> EpcResult<()> {
-        let connection = EpcConnection::new(stream).await?;
-        
-        // Copy methods to the connection
-        let method_names: Vec<String> = {
-            let server_methods = methods.lock().unwrap();
-            server_methods.keys().cloned().collect()
-        };
-        
-        for name in method_names {
-            let name_clone = name.clone();
-            let methods_ref = Arc::clone(&methods);
-            
-            connection.register_method(name_clone.clone(), move |args| {
-                let methods = methods_ref.lock().unwrap();
-                if let Some(handler) = methods.get(&name_clone) {
-                    handler(args)
-                } else {
-                    Err(EpcError::MethodNotFound(name_clone.clone()))
-                }
-            }).await;
-        }
-        
-        // Keep the connection alive
-        // In a real implementation, we might want to add some way to detect
-        // when the connection is closed and clean up
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+        // Use the simpler ServerConnectionHandler that doesn't compete with client connections
+        let handler = crate::server_handler::ServerConnectionHandler::new(stream, methods);
+        handler.handle().await
     }
 }
 

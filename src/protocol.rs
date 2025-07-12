@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use std::collections::HashMap;
@@ -18,10 +20,19 @@ pub struct EpcConnection {
     pending_calls: Arc<Mutex<HashMap<SessionId, PendingCall>>>,
     message_sender: mpsc::UnboundedSender<Message>,
     shutdown_sender: Option<oneshot::Sender<()>>,
+    _read_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl EpcConnection {
     pub async fn new(stream: TcpStream) -> EpcResult<Self> {
+        Self::new_with_reader(stream, true).await
+    }
+    
+    pub async fn new_server_side(stream: TcpStream) -> EpcResult<Self> {
+        Self::new_with_reader(stream, false).await
+    }
+    
+    async fn new_with_reader(stream: TcpStream, _start_reader: bool) -> EpcResult<Self> {
         let stream = Arc::new(Mutex::new(stream));
         let methods = Arc::new(Mutex::new(HashMap::new()));
         let pending_calls = Arc::new(Mutex::new(HashMap::new()));
@@ -36,18 +47,24 @@ impl EpcConnection {
         // Spawn writer task
         tokio::spawn(async move {
             let mut shutdown_receiver = shutdown_receiver;
+            debug!("Starting writer task");
             
             loop {
                 tokio::select! {
                     msg = message_receiver.recv() => {
                         match msg {
                             Some(message) => {
+                                debug!("Writer task sending message");
                                 if let Err(e) = Self::send_message(&stream_writer, &message).await {
                                     error!("Failed to send message: {}", e);
                                     break;
                                 }
+                                debug!("Writer task sent message successfully");
                             }
-                            None => break,
+                            None => {
+                                debug!("Writer task channel closed");
+                                break;
+                            }
                         }
                     }
                     _ = &mut shutdown_receiver => {
@@ -56,6 +73,7 @@ impl EpcConnection {
                     }
                 }
             }
+            debug!("Writer task ended");
         });
         
         // Clone for the reader task
@@ -65,7 +83,8 @@ impl EpcConnection {
         let message_sender_reader = message_sender.clone();
         
         // Spawn reader task
-        tokio::spawn(async move {
+        let read_task = tokio::spawn(async move {
+            debug!("Starting read loop for connection");
             if let Err(e) = Self::read_loop(
                 stream_reader,
                 methods_reader,
@@ -74,6 +93,7 @@ impl EpcConnection {
             ).await {
                 error!("Reader task error: {}", e);
             }
+            debug!("Read loop ended");
         });
         
         Ok(EpcConnection {
@@ -82,18 +102,29 @@ impl EpcConnection {
             pending_calls,
             message_sender,
             shutdown_sender: Some(shutdown_sender),
+            _read_task: Some(read_task),
         })
     }
     
     async fn send_message(stream: &Arc<Mutex<TcpStream>>, message: &Message) -> EpcResult<()> {
         let serialized = message.to_sexpr()?;
-        let length = serialized.len();
+        
+        // Python EPC style: include newline and add +1 to length
+        let mut full_message = serialized;
+        full_message.push('\n');
+        let length = full_message.len();
         let header = format!("{:06x}", length);
         
+        debug!("Sending raw message: {}{}", header, full_message.trim());
+        
         let mut stream = stream.lock().await;
+        debug!("Acquired stream lock, writing header");
         stream.write_all(header.as_bytes()).await?;
-        stream.write_all(serialized.as_bytes()).await?;
+        debug!("Wrote header, writing message");
+        stream.write_all(full_message.as_bytes()).await?;
+        debug!("Wrote message, flushing");
         stream.flush().await?;
+        debug!("Flushed successfully");
         
         debug!("Sent message: {} bytes", length);
         Ok(())
@@ -116,10 +147,13 @@ impl EpcConnection {
             };
             
             if bytes_read == 0 {
+                debug!("Connection closed, 0 bytes read");
                 return Err(EpcError::ConnectionClosed);
             }
             
+            debug!("Read {} bytes from stream", bytes_read);
             message_buffer.extend_from_slice(&buffer[..bytes_read]);
+            debug!("Message buffer now has {} bytes", message_buffer.len());
             
             loop {
                 if expected_length.is_none() && message_buffer.len() >= 6 {
@@ -137,8 +171,12 @@ impl EpcConnection {
                         let message_str = String::from_utf8(message_data)
                             .map_err(|_| EpcError::InvalidMessage)?;
                         
+                        debug!("Attempting to parse message: {}", message_str);
+                        
                         match Message::from_sexpr(&message_str) {
                             Ok(message) => {
+                                debug!("Successfully parsed as Message: {:?}", message);
+                                debug!("Message type: {:?}, Session: {}", message.msg_type, message.session_id);
                                 Self::handle_message(
                                     message,
                                     &methods,
@@ -147,7 +185,13 @@ impl EpcConnection {
                                 ).await;
                             }
                             Err(e) => {
-                                warn!("Failed to parse message: {}", e);
+                                warn!("Failed to parse message: {} - Raw message: {}", e, message_str);
+                                // Try to send an error response with a generic session ID
+                                let error_msg = Message::new_epc_error(
+                                    "0".to_string(),
+                                    format!("Invalid message format: {}", e),
+                                );
+                                let _ = message_sender.send(error_msg);
                             }
                         }
                         
@@ -213,24 +257,40 @@ impl EpcConnection {
         };
         
         let response = match result {
-            Ok(value) => Message::new_return(message.session_id, value),
+            Ok(value) => {
+                debug!("Method call successful, returning: {:?}", value);
+                Message::new_return(message.session_id, value)
+            },
             Err(EpcError::MethodNotFound(method)) => {
+                debug!("Method not found: {}", method);
                 Message::new_epc_error(message.session_id, format!("Method not found: {}", method))
             }
-            Err(e) => Message::new_return_error(message.session_id, e.to_string()),
+            Err(e) => {
+                debug!("Method call error: {}", e);
+                Message::new_return_error(message.session_id, e.to_string())
+            },
         };
         
-        let _ = message_sender.send(response);
+        debug!("Sending response: {:?}", response);
+        match message_sender.send(response) {
+            Ok(_) => debug!("Response sent successfully"),
+            Err(e) => error!("Failed to send response: {}", e),
+        }
     }
     
     async fn handle_return(
         message: Message,
         pending_calls: &Arc<Mutex<HashMap<SessionId, PendingCall>>>,
     ) {
+        debug!("Handling return message for session: {}", message.session_id);
         let mut pending = pending_calls.lock().await;
         if let Some(sender) = pending.remove(&message.session_id) {
+            debug!("Found pending call for session {}, sending response", message.session_id);
             let _ = sender.send(Ok(message.payload));
+        } else {
+            debug!("No pending call found for session {}", message.session_id);
         }
+        debug!("Remaining pending calls: {}", pending.len());
     }
     
     async fn handle_error_return(
@@ -260,8 +320,8 @@ impl EpcConnection {
         let method_list: Vec<EpcValue> = methods.keys()
             .map(|name| EpcValue::List(vec![
                 EpcValue::Symbol(name.clone()),
-                EpcValue::Nil, // argdoc placeholder
-                EpcValue::Nil, // docstring placeholder
+                EpcValue::String("".to_string()), // argdoc placeholder - should be string, not Nil
+                EpcValue::String("".to_string()), // docstring placeholder - should be string, not Nil
             ]))
             .collect();
         
@@ -285,18 +345,26 @@ impl EpcConnection {
         let message = Message::new_call(method_name, args);
         let session_id = message.session_id.clone();
         
+        debug!("Calling method: {} with session_id: {}", message.get_method_name().unwrap_or("unknown"), session_id);
+        
         let (sender, receiver) = oneshot::channel();
         
         {
             let mut pending = self.pending_calls.lock().await;
-            pending.insert(session_id, sender);
+            pending.insert(session_id.clone(), sender);
+            debug!("Added session {} to pending calls. Total pending: {}", session_id, pending.len());
         }
         
         self.message_sender.send(message)
             .map_err(|_| EpcError::ConnectionClosed)?;
         
-        receiver.await
-            .map_err(|_| EpcError::ConnectionClosed)?
+        debug!("Sent message for session {}, waiting for response...", session_id);
+        
+        let result = receiver.await
+            .map_err(|_| EpcError::ConnectionClosed)?;
+        
+        debug!("Received response for session {}: {:?}", session_id, result);
+        result
     }
     
     pub async fn query_methods(&self) -> EpcResult<Vec<EpcValue>> {

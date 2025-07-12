@@ -2,7 +2,7 @@ use rust_elrpc::{EpcClient, EpcValue, EpcResult};
 
 #[tokio::main]
 async fn main() -> EpcResult<()> {
-    env_logger::init();
+    rust_elrpc::init_file_logging().expect("Failed to initialize logging");
     
     // Connect to a server process (you need to start echo_server first)
     let client = EpcClient::connect("localhost", 12345).await?;
