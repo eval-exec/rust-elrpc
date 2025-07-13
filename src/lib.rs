@@ -8,9 +8,11 @@ pub mod protocol;
 pub mod registry;
 pub mod server;
 pub mod client;
+pub mod uid;
 
 pub use error::{ERPCError, Result};
 pub use protocol::{Framer, Message};
 pub use registry::{MethodInfo, MethodRegistry};
 pub use server::{Server, ServerConfig};
 pub use client::{Client, Process};
+pub use uid::UidGenerator;

@@ -1,11 +1,11 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bytes::BytesMut;
 use tracing::debug;
-use lexpr::Value;
 use serde::{Serialize, Deserialize};
 
 use crate::error::ERPCError;
@@ -16,7 +16,7 @@ use crate::registry::{MethodInfo, MethodRegistry};
 pub struct Client {
     stream: Arc<Mutex<TcpStream>>,
     registry: Arc<MethodRegistry>,
-    next_uid: Arc<Mutex<u64>>,
+    next_uid: Arc<AtomicU64>,
 }
 
 impl Client {
@@ -31,7 +31,7 @@ impl Client {
         Ok(Client {
             stream: Arc::new(Mutex::new(stream)),
             registry: Arc::new(MethodRegistry::new()),
-            next_uid: Arc::new(Mutex::new(1)),
+            next_uid: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -42,12 +42,8 @@ impl Client {
     }
 
     /// Generate next UID
-    fn next_uid(&self
-    ) -> u64 {
-        let mut uid = self.next_uid.blocking_lock();
-        let result = *uid;
-        *uid += 1;
-        result
+    fn next_uid(&self) -> u64 {
+        self.next_uid.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Send a message and wait for response
@@ -294,6 +290,7 @@ impl Process {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lexpr::Value;
 
     #[tokio::test]
     async fn test_client_connection() {
