@@ -291,26 +291,15 @@ async fn process_message(
             let methods = registry.query_methods().await?;
             debug!("Found {} methods to return", methods.len());
             
+            // Create the expected format for methods response: list of [name, arg_spec, docstring]
             let method_list = Value::list(
                 methods.into_iter()
                     .map(|info| {
-                        let mut items = vec![
-                            Value::symbol(info.name),
-                        ];
-                        
-                        if let Some(args) = info.arg_spec {
-                            items.push(Value::string(args));
-                        } else {
-                            items.push(Value::Null);
-                        }
-                        
-                        if let Some(doc) = info.docstring {
-                            items.push(Value::string(doc));
-                        } else {
-                            items.push(Value::Null);
-                        }
-                        
-                        Value::list(items)
+                        Value::list(vec![
+                            Value::string(info.name),
+                            info.arg_spec.map(Value::string).unwrap_or(Value::Null),
+                            info.docstring.map(Value::string).unwrap_or(Value::Null),
+                        ])
                     })
                     .collect::<Vec<Value>>()
             );
