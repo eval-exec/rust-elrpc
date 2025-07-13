@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
+use lexpr::from_str;
 use crate::types::EpcValue;
 use crate::error::{EpcError, EpcResult};
 
@@ -143,180 +144,51 @@ impl Message {
     
     /// Deserialize message from S-expression format
     pub fn from_sexpr(data: &str) -> EpcResult<Self> {
-        // Custom parser to handle symbols that serde-lexpr can't handle properly
-        let list = Self::parse_sexpr_list(data)?;
-        
-        if list.len() < 3 {
-            return Err(EpcError::serialization("Message must have at least 3 elements".to_string()));
-        }
-        
-        // Extract message type
-        let msg_type = match &list[0] {
-            EpcValue::Symbol(s) => match s.as_str() {
-                "call" => MessageType::Call,
-                "return" => MessageType::Return,
-                "return-error" => MessageType::ReturnError,
-                "epc-error" => MessageType::EpcError,
-                "methods" => MessageType::Methods,
-                _ => return Err(EpcError::serialization(format!("Unknown message type: {}", s))),
-            },
-            _ => return Err(EpcError::serialization("First element must be a symbol".to_string())),
-        };
-        
-        // Extract session ID - handle both integer and string formats
-        let session_id = match &list[1] {
-            EpcValue::String(s) => s.clone(),
-            EpcValue::Int(i) => i.to_string(),
-            _ => return Err(EpcError::serialization("Second element must be a string or integer (session ID)".to_string())),
-        };
-        
-        // For call messages, the format is (call uid method-name args...)
-        // For return messages, the format is (return uid result)
-        let payload = if msg_type == MessageType::Call {
-            // Extract method name (3rd element)
-            let method_name = match list.get(2) {
-                Some(EpcValue::Symbol(s)) => s.clone(),
-                Some(EpcValue::String(s)) => s.clone(),
-                _ => return Err(EpcError::serialization("Call message must have method name as 3rd element".to_string())),
+        let lexpr_value: lexpr::Value = from_str(data)
+            .map_err(|e| EpcError::serialization(format!("Failed to parse S-expression: {}", e)))?;
+
+        if let Some(list) = lexpr_value.to_vec() {
+            if list.len() < 3 {
+                return Err(EpcError::serialization("Message must have at least 3 elements".to_string()));
+            }
+
+            let msg_type = match list[0].as_symbol() {
+                Some("call") => MessageType::Call,
+                Some("return") => MessageType::Return,
+                Some("return-error") => MessageType::ReturnError,
+                Some("epc-error") => MessageType::EpcError,
+                Some("methods") => MessageType::Methods,
+                _ => return Err(EpcError::serialization("First element must be a message type symbol".to_string())),
             };
-            
-            // Extract args (4th element onwards) - flatten any nested lists from parsing
-            let mut args: Vec<EpcValue> = list.into_iter().skip(3).collect();
-            
-            // If there's only one argument and it's a list, use its contents as the args
-            // This handles the case where Emacs sends (call uid method (arg1 arg2))
-            if args.len() == 1 {
-                if let EpcValue::List(inner_args) = &args[0] {
-                    args = inner_args.clone();
-                }
-            }
-            
-            // Create the expected payload format: [method_name, [args]]
-            EpcValue::List(vec![
-                EpcValue::String(method_name),
-                EpcValue::List(args),
-            ])
-        } else {
-            // For non-call messages, use the 3rd element as payload
-            list.into_iter().nth(2).unwrap_or(EpcValue::Nil)
-        };
-        
-        Ok(Message {
-            msg_type,
-            session_id,
-            payload,
-        })
-    }
-    
-    /// Simple S-expression parser to handle symbols properly
-    fn parse_sexpr_list(data: &str) -> EpcResult<Vec<EpcValue>> {
-        let trimmed = data.trim();
-        if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
-            return Err(EpcError::serialization(format!("S-expression must be wrapped in parentheses - Raw: {}", data)));
-        }
 
-        let inner = &trimmed[1..trimmed.len()-1];
-        let mut result = Vec::new();
-        let mut chars = inner.chars().peekable();
-        
-        while let Some(char) = chars.peek() {
-            match char {
-                ' ' | '\t' | '\n' => {
-                    // Skip whitespace
-                    chars.next(); 
-                }
-                '(' => {
-                    // Nested list
-                    let list_str = Self::read_nested_list(&mut chars)?;
-                    result.push(EpcValue::List(Self::parse_sexpr_list(&list_str)?));
-                }
-                '"' => {
-                    // String literal
-                    let string_literal = Self::read_string_literal(&mut chars)?;
-                    result.push(EpcValue::String(string_literal));
-                }
-                _ => {
-                    // Atom (symbol or number)
-                    let token = Self::read_token(&mut chars);
-                    if !token.is_empty() {
-                        result.push(Self::parse_token(&token)?);
-                    }
-                }
-            }
-        }
-        
-        Ok(result)
-    }
+            let session_id = match &list[1] {
+                lexpr::Value::String(s) => s.to_string(),
+                lexpr::Value::Number(n) => n.to_string(),
+                _ => return Err(EpcError::serialization("Second element must be a string or integer (session ID)".to_string())),
+            };
 
-    fn read_nested_list(chars: &mut std::iter::Peekable<std::str::Chars>) -> EpcResult<String> {
-        let mut list_str = String::new();
-        let mut level = 0;
-        
-        while let Some(char) = chars.next() {
-            list_str.push(char);
-            match char {
-                '(' => level += 1,
-                ')' => {
-                    level -= 1;
-                    if level == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        
-        if level == 0 {
-            Ok(list_str)
-        } else {
-            Err(EpcError::serialization("Mismatched parentheses in S-expression".to_string()))
-        }
-    }
+            let payload = if msg_type == MessageType::Call {
+                let method_name = match list[2].as_symbol() {
+                    Some(s) => s.to_string(),
+                    None => return Err(EpcError::serialization("Call message must have method name as 3rd element".to_string())),
+                };
 
-    fn read_string_literal(chars: &mut std::iter::Peekable<std::str::Chars>) -> EpcResult<String> {
-        let mut s = String::new();
-        chars.next(); // Consume opening quote
-        
-        let mut escaped = false;
-        while let Some(char) = chars.next() {
-            if escaped {
-                s.push(char);
-                escaped = false;
-            } else if char == '\\' {
-                escaped = true;
-            } else if char == '"' {
-                return Ok(s); // End of string
+                let args: Vec<EpcValue> = list.into_iter().skip(3).map(EpcValue::from).collect();
+                EpcValue::List(vec![
+                    EpcValue::String(method_name),
+                    EpcValue::List(args),
+                ])
             } else {
-                s.push(char);
-            }
-        }
-        
-        Err(EpcError::serialization("Unterminated string literal".to_string()))
-    }
+                EpcValue::from(list[2].clone())
+            };
 
-    fn read_token(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
-        let mut token = String::new();
-        while let Some(&char) = chars.peek() {
-            if char.is_whitespace() || char == '(' || char == ')' {
-                break;
-            }
-            token.push(chars.next().unwrap());
-        }
-        token
-    }
-    
-    fn parse_token(token: &str) -> EpcResult<EpcValue> {
-        if token == "nil" {
-            Ok(EpcValue::Nil)
-        } else if token == "t" {
-            Ok(EpcValue::Bool(true))
-        } else if let Ok(int_val) = token.parse::<i64>() {
-            Ok(EpcValue::Int(int_val))
-        } else if let Ok(float_val) = token.parse::<f64>() {
-            Ok(EpcValue::Float(float_val))
+            Ok(Message {
+                msg_type,
+                session_id,
+                payload,
+            })
         } else {
-            // Everything else is a symbol
-            Ok(EpcValue::Symbol(token.to_string()))
+            Err(EpcError::serialization("Message must be a list".to_string()))
         }
     }
     

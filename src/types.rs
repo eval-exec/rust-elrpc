@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use lexpr::Value as LexprValue;
 
 /// Represents values that can be serialized/deserialized in EPC protocol
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -93,5 +94,39 @@ impl<T: Into<EpcValue>> From<Vec<T>> for EpcValue {
 impl<T: Into<EpcValue>> From<HashMap<String, T>> for EpcValue {
     fn from(map: HashMap<String, T>) -> Self {
         EpcValue::Dict(map.into_iter().map(|(k, v)| (k, v.into())).collect())
+    }
+}
+
+impl From<LexprValue> for EpcValue {
+    fn from(value: LexprValue) -> Self {
+        match value {
+            LexprValue::Nil => EpcValue::Nil,
+            LexprValue::Bool(b) => EpcValue::Bool(b),
+            LexprValue::Number(n) => {
+                if n.is_i64() {
+                    EpcValue::Int(n.as_i64().unwrap())
+                } else {
+                    EpcValue::Float(n.as_f64().unwrap())
+                }
+            }
+            LexprValue::String(s) => EpcValue::String(s.to_string()),
+            LexprValue::Symbol(s) => EpcValue::Symbol(s.to_string()),
+            LexprValue::Cons(cons) => {
+                let (car, cdr) = cons.into_pair();
+                if cdr == LexprValue::Nil {
+                    EpcValue::List(vec![EpcValue::from(car)])
+                } else {
+                     let mut vec = vec![EpcValue::from(car)];
+                     let mut current = cdr;
+                     while let LexprValue::Cons(cons) = current {
+                         let (car, cdr) = cons.into_pair();
+                         vec.push(EpcValue::from(car));
+                         current = cdr;
+                     }
+                     EpcValue::List(vec)
+                }
+            }
+            _ => EpcValue::Nil, // Fallback for other types
+        }
     }
 }

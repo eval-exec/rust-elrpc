@@ -26,15 +26,28 @@ async fn main() -> EpcResult<()> {
     
     server.register_method("add".to_string(), |args| {
         eprintln!("➕ Add called with args: {:?}", args);
-        if args.len() != 2 {
+        
+        // EPC protocol sends arguments as a single list
+        if args.len() != 1 {
+            return Err(rust_elrpc::EpcError::application("Expected argument list"));
+        }
+        
+        let arg_list = &args[0];
+        let actual_args = if let EpcValue::List(ref inner_args) = arg_list {
+            inner_args
+        } else {
+            return Err(rust_elrpc::EpcError::application("Arguments must be provided as a list"));
+        };
+
+        if actual_args.len() != 2 {
             return Err(rust_elrpc::EpcError::application("add requires exactly 2 arguments"));
         }
         
-        let a = args[0].as_int().ok_or_else(|| {
+        let a = actual_args[0].as_int().ok_or_else(|| {
             rust_elrpc::EpcError::application("First argument must be an integer")
         })?;
         
-        let b = args[1].as_int().ok_or_else(|| {
+        let b = actual_args[1].as_int().ok_or_else(|| {
             rust_elrpc::EpcError::application("Second argument must be an integer")
         })?;
         
@@ -45,11 +58,24 @@ async fn main() -> EpcResult<()> {
     
     server.register_method("greet".to_string(), |args| {
         eprintln!("👋 Greet called with args: {:?}", args);
-        if let Some(EpcValue::String(name)) = args.get(0) {
-            Ok(EpcValue::String(format!("Hello, {}! 🦀", name)))
+        
+        let name = if args.len() >= 1 {
+            if let EpcValue::List(ref arg_list) = args[0] {
+                if let Some(EpcValue::String(name)) = arg_list.get(0) {
+                    name.clone()
+                } else {
+                    "World".to_string()
+                }
+            } else if let Some(EpcValue::String(name)) = args.get(0) {
+                name.clone()
+            } else {
+                "World".to_string()
+            }
         } else {
-            Ok(EpcValue::String("Hello, World! 🦀".to_string()))
-        }
+            "World".to_string()
+        };
+        
+        Ok(EpcValue::String(format!("Hello, {}! 🦀", name)))
     });
     
     server.register_method("error_test".to_string(), |_args| {
