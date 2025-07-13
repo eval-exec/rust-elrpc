@@ -83,7 +83,7 @@ impl Message {
     }
 
     /// Serialize message to S-expression string
-    pub fn to_sexp(&self) -> crate::Result<String> {
+    pub fn to_sexp(&self) -> std::result::Result<String, crate::error::ERPCError> {
         let sexp = match self {
             Message::Call { uid, method, args } => {
                 Value::list(vec![
@@ -122,11 +122,11 @@ impl Message {
             }
         };
         
-        Ok(lexpr::to_string(&sexp)?)
+        lexpr::to_string(&sexp).map_err(|e| crate::error::ERPCError::SerializationError(e.to_string()))
     }
 
     /// Parse message from S-expression string
-    pub fn from_sexp(s: &str) -> crate::Result<Self> {
+    pub fn from_sexp(s: &str) -> std::result::Result<Self, crate::error::ERPCError> {
         let value = lexpr::from_str(s)?;
         
         // Handle both Cons and proper list formats

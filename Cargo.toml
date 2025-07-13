@@ -19,9 +19,17 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 bytes = "1.0"
 uuid = { version = "1.0", features = ["v4"] }
+async-trait = "0.1"
 
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.0"
 
 
+[[example]]
+name = "echo_server"
+path = "examples/echo_server.rs"
+
+[[example]]
+name = "echo_client"
+path = "examples/echo_client.rs"
