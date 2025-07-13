@@ -68,6 +68,7 @@ impl Server {
         addr: impl Into<String>
     ) -> std::result::Result<SocketAddr, ERPCError> {
         let addr = addr.into();
+        debug!("Binding server to address: {}", addr);
         let listener = TcpListener::bind(&addr).await
             .map_err(|e| ERPCError::Io(e))?;
         
@@ -76,7 +77,8 @@ impl Server {
         
         self.listener = Some(listener);
         
-        info!("EPC server bound to {}", socket_addr);
+        info!("EPC server successfully bound to {}", socket_addr);
+        debug!("Server ready to accept connections on {}", socket_addr);
         Ok(socket_addr)
     }
 
@@ -99,34 +101,41 @@ impl Server {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
         self.shutdown_tx = Some(shutdown_tx);
         
+        info!("Starting server listener on {}", listener.local_addr()?);
+        
         let handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     accept_result = listener.accept() => {
                         match accept_result {
                             Ok((stream, addr)) => {
-                                debug!("New connection from {}", addr);
+                                info!("New connection accepted from {}", addr);
+                                debug!("Spawning handler for connection from {}", addr);
                                 let registry = registry.clone();
                                 let config = config.clone();
                                 
                                 tokio::spawn(async move {
+                                    debug!("Starting connection handler for {}", addr);
                                     if let Err(e) = handle_connection(stream, addr, registry, config).await {
                                         error!("Connection error from {}: {}", addr, e);
+                                    } else {
+                                        debug!("Connection handler completed for {}", addr);
                                     }
                                 });
                             }
                             Err(e) => {
-                                error!("Accept error: {}", e);
+                                error!("Failed to accept connection: {}", e);
                                 break;
                             }
                         }
                     }
                     _ = shutdown_rx.recv() => {
-                        info!("Server shutting down");
+                        info!("Server received shutdown signal, stopping...");
                         break;
                     }
                 }
             }
+            info!("Server listener stopped");
             Ok(())
         });
         
@@ -184,41 +193,60 @@ async fn handle_connection(
     registry: Arc<MethodRegistry>,
     _config: ServerConfig,
 ) -> std::result::Result<(), ERPCError> {
-    info!("Handling connection from {}", addr);
+    info!("Starting to handle connection from {}", addr);
+    debug!("Connection details: local_addr={}, peer_addr={}", 
+           stream.local_addr().unwrap_or_else(|_| "unknown".parse().unwrap()),
+           addr);
     
     let mut buffer = BytesMut::with_capacity(1024);
+    let mut message_count = 0;
     
     loop {
+        debug!("Waiting for data from client {}", addr);
         // Read more data
         let bytes_read = stream.read_buf(&mut buffer).await
             .map_err(|e| ERPCError::Io(e))?;
         
+        debug!("Received {} bytes from client {}", bytes_read, addr);
+        
         if bytes_read == 0 {
-            debug!("Client {} disconnected", addr);
+            info!("Client {} disconnected gracefully", addr);
             break;
         }
         
+        debug!("Total buffer size: {} bytes for client {}", buffer.len(), addr);
+        
         // Process complete messages
         while let Some(message_bytes) = Framer::extract_message(&mut buffer) {
+            message_count += 1;
+            debug!("Processing message #{} from client {} ({} bytes)", message_count, addr, message_bytes.len());
+            
             match process_message(message_bytes, &registry).await {
                 Ok(response) => {
+                    debug!("Generated response for client {}: {} bytes", addr, response.len());
                     let framed = Framer::frame(response.as_bytes());
+                    debug!("Sending framed response to client {}: {} bytes total", addr, framed.len());
                     stream.write_all(&framed).await
                         .map_err(|e| ERPCError::Io(e))?;
+                    debug!("Successfully sent response to client {}", addr);
                 }
                 Err(e) => {
-                    warn!("Error processing message from {}: {}", addr, e);
+                    error!("Error processing message #{} from {}: {}", message_count, addr, e);
                     let error_msg = Message::new_epc_error(0, e.to_string())
                         .to_sexp()
                         .unwrap_or_else(|_| "(epc-error 0 \"Unknown error\")".to_string());
+                    debug!("Sending error response to client {}: {}", addr, error_msg);
                     let framed = Framer::frame(error_msg.as_bytes());
                     let _ = stream.write_all(&framed).await;
                     break;
                 }
             }
         }
+        
+        debug!("Processed all complete messages for client {}, remaining buffer: {} bytes", addr, buffer.len());
     }
     
+    info!("Connection handler completed for client {}, processed {} messages", addr, message_count);
     Ok(())
 }
 
@@ -227,26 +255,42 @@ async fn process_message(
     message_bytes: bytes::Bytes,
     registry: &Arc<MethodRegistry>,
 ) -> std::result::Result<String, ERPCError> {
+    debug!("Processing message: {} bytes", message_bytes.len());
+    
     let message_str = std::str::from_utf8(&message_bytes)
         .map_err(|e| ERPCError::InvalidMessageFormat(e.to_string()))?;
     
+    debug!("Received message string: {}", message_str);
+    
     let message = Message::from_sexp(message_str)?;
+    
+    debug!("Parsed message: {:?}", message);
     
     match message {
         Message::Call { uid, method, args } => {
+            debug!("Processing CALL uid={}, method={}, args={:?}", uid, method, args);
             match registry.call_method(&method, args).await {
                 Ok(result) => {
+                    debug!("Method '{}' executed successfully, result: {:?}", method, result);
                     let response = Message::new_return(uid, result);
-                    response.to_sexp()
+                    let sexp = response.to_sexp()?;
+                    debug!("Returning response: {}", sexp);
+                    Ok(sexp)
                 }
                 Err(e) => {
+                    error!("Method '{}' failed: {}", method, e);
                     let response = Message::new_return_error(uid, e.to_string());
-                    response.to_sexp()
+                    let sexp = response.to_sexp()?;
+                    debug!("Returning error response: {}", sexp);
+                    Ok(sexp)
                 }
             }
         }
         Message::Methods { uid } => {
+            debug!("Processing METHODS query uid={}", uid);
             let methods = registry.query_methods().await?;
+            debug!("Found {} methods to return", methods.len());
+            
             let method_list = Value::list(
                 methods.into_iter()
                     .map(|info| {
@@ -271,11 +315,15 @@ async fn process_message(
                     .collect::<Vec<Value>>()
             );
             
-            Message::new_return(uid, method_list).to_sexp()
+            let response = Message::new_return(uid, method_list);
+            let sexp = response.to_sexp()?;
+            debug!("Returning methods response: {}", sexp);
+            Ok(sexp)
         }
         _ => {
+            warn!("Received unexpected message type: {:?}", message);
             Err(ERPCError::InvalidMessageFormat(
-                "Unexpected message type".to_string(),
+                format!("Unexpected message type: {:?}", message),
             ))
         }
     }

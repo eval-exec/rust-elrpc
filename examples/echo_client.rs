@@ -1,7 +1,10 @@
 use elrpc::{Client, Result};
+use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize tracing
+    tracing_subscriber::fmt::init();
     // Connect to server (replace with actual port)
     let client = Client::connect("127.0.0.1:12345").await?;
     
