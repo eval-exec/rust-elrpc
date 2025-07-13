@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::fmt;
+use std::sync::Arc;
 
 use lexpr::Value;
 use serde::{Deserialize, Serialize};
@@ -46,10 +46,8 @@ impl fmt::Display for MethodInfo {
 /// Trait for methods that can be registered
 #[async_trait::async_trait]
 pub trait MethodHandler: Send + Sync {
-    async fn call(&self,
-        args: Value,
-    ) -> std::result::Result<Value, ERPCError>;
-    
+    async fn call(&self, args: Value) -> std::result::Result<Value, ERPCError>;
+
     fn info(&self) -> MethodInfo;
 }
 
@@ -78,12 +76,10 @@ impl ClosureHandler {
 
 #[async_trait::async_trait]
 impl MethodHandler for ClosureHandler {
-    async fn call(&self,
-        args: Value,
-    ) -> std::result::Result<Value, ERPCError> {
+    async fn call(&self, args: Value) -> std::result::Result<Value, ERPCError> {
         (self.func)(args)
     }
-    
+
     fn info(&self) -> MethodInfo {
         self.info.clone()
     }
@@ -114,12 +110,10 @@ impl ValueHandler {
 
 #[async_trait::async_trait]
 impl MethodHandler for ValueHandler {
-    async fn call(&self,
-        args: Value,
-    ) -> std::result::Result<Value, ERPCError> {
+    async fn call(&self, args: Value) -> std::result::Result<Value, ERPCError> {
         (self.func)(args)
     }
-    
+
     fn info(&self) -> MethodInfo {
         self.info.clone()
     }
@@ -156,9 +150,9 @@ impl MethodRegistry {
             move |args_val: Value| {
                 let args: Args = serde_lexpr::from_value(&args_val)
                     .map_err(|e| ERPCError::SerializationError(e.to_string()))?;
-                
+
                 let result = func(args)?;
-                
+
                 serde_lexpr::to_value(&result)
                     .map_err(|e| ERPCError::SerializationError(e.to_string()))
             },
@@ -166,17 +160,13 @@ impl MethodRegistry {
             arg_spec,
             docstring,
         ));
-        
+
         self.methods.write().await.insert(name, handler);
         Ok(())
     }
 
     /// Register a method with handler
-    pub async fn register_handler(
-        &self,
-        name: impl Into<String>,
-        handler: Arc<dyn MethodHandler>,
-    ) {
+    pub async fn register_handler(&self, name: impl Into<String>, handler: Arc<dyn MethodHandler>) {
         let name = name.into();
         self.methods.write().await.insert(name, handler);
     }
@@ -188,26 +178,25 @@ impl MethodRegistry {
         args: Value,
     ) -> std::result::Result<Value, crate::error::ERPCError> {
         let methods = self.methods.read().await;
-        let handler = methods.get(name)
+        let handler = methods
+            .get(name)
             .ok_or_else(|| ERPCError::MethodNotFound(name.to_string()))?
             .clone();
-        
+
         handler.call(args).await
     }
 
     /// Check if a method exists
-    pub async fn has_method(&self,
-        name: &str
-    ) -> bool {
+    pub async fn has_method(&self, name: &str) -> bool {
         self.methods.read().await.contains_key(name)
     }
 
     /// Get method information for introspection
-    pub async fn query_methods(&self) -> std::result::Result<Vec<MethodInfo>, crate::error::ERPCError> {
+    pub async fn query_methods(
+        &self,
+    ) -> std::result::Result<Vec<MethodInfo>, crate::error::ERPCError> {
         let methods = self.methods.read().await;
-        Ok(methods.values()
-            .map(|handler| handler.info())
-            .collect())
+        Ok(methods.values().map(|handler| handler.info()).collect())
     }
 
     /// Register a method that accepts Value directly (for maximum flexibility)
@@ -228,14 +217,17 @@ impl MethodRegistry {
             arg_spec,
             docstring,
         ));
-        
+
         self.methods.write().await.insert(name, handler);
         Ok(())
     }
 
     /// Remove a method
     pub async fn unregister(&self, name: &str) -> std::result::Result<(), crate::error::ERPCError> {
-        self.methods.write().await.remove(name)
+        self.methods
+            .write()
+            .await
+            .remove(name)
             .ok_or_else(|| ERPCError::MethodNotFound(name.to_string()))?;
         Ok(())
     }
@@ -254,17 +246,23 @@ mod tests {
     #[tokio::test]
     async fn test_method_registration() {
         let registry = MethodRegistry::new();
-        
-        registry.register_closure(
-            "echo",
-            |args: String| Ok(args),
-            Some("args"),
-            Some("Echo back the arguments"),
-        ).await.unwrap();
-        
-        let result = registry.call_method("echo", Value::from("hello")).await.unwrap();
+
+        registry
+            .register_closure(
+                "echo",
+                |args: String| Ok(args),
+                Some("args"),
+                Some("Echo back the arguments"),
+            )
+            .await
+            .unwrap();
+
+        let result = registry
+            .call_method("echo", Value::from("hello"))
+            .await
+            .unwrap();
         assert_eq!(result, Value::from("hello"));
-        
+
         let methods = registry.query_methods().await.unwrap();
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].name, "echo");
@@ -273,24 +271,29 @@ mod tests {
     #[tokio::test]
     async fn test_typed_method_registration() {
         let registry = MethodRegistry::new();
-        
-        registry.register_closure(
-            "add",
-            |(a, b): (i64, i64)| Ok(a + b),
-            Some("a b"),
-            Some("Add two numbers"),
-        ).await.unwrap();
-        
-        let result = registry.call_method("add", Value::list(vec![Value::from(5), Value::from(3)]))
-            .await.unwrap();
-        
+
+        registry
+            .register_closure(
+                "add",
+                |(a, b): (i64, i64)| Ok(a + b),
+                Some("a b"),
+                Some("Add two numbers"),
+            )
+            .await
+            .unwrap();
+
+        let result = registry
+            .call_method("add", Value::list(vec![Value::from(5), Value::from(3)]))
+            .await
+            .unwrap();
+
         assert_eq!(result, Value::from(8));
     }
 
     #[tokio::test]
     async fn test_method_not_found() {
         let registry = MethodRegistry::new();
-        
+
         let result = registry.call_method("nonexistent", Value::Null).await;
         assert!(matches!(result, Err(ERPCError::MethodNotFound(_))));
     }

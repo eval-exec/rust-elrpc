@@ -89,7 +89,7 @@ mod tests {
 
         // Check we have 1000 unique UIDs
         assert_eq!(all_uids.len(), 1000);
-        
+
         // Sort and check they're sequential
         all_uids.sort();
         for (i, uid) in all_uids.iter().enumerate() {
@@ -103,7 +103,7 @@ mod tests {
         assert_eq!(gen.current(), 1);
         assert_eq!(gen.next(), 1);
         assert_eq!(gen.current(), 2);
-        
+
         gen.reset(1000);
         assert_eq!(gen.current(), 1000);
         assert_eq!(gen.next(), 1000);
