@@ -5,3 +5,4 @@ python-epc
 node-elrpc
 ruby-elrpc
 src/bin
+lexpr-rs
