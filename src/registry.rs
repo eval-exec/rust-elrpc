@@ -89,6 +89,42 @@ impl MethodHandler for ClosureHandler {
     }
 }
 
+/// Handler for Value-based methods (direct lexpr::Value handling)
+pub struct ValueHandler {
+    func: Box<dyn Fn(Value) -> std::result::Result<Value, ERPCError> + Send + Sync>,
+    info: MethodInfo,
+}
+
+impl ValueHandler {
+    pub fn new<F>(
+        func: F,
+        name: impl Into<String>,
+        arg_spec: Option<impl Into<String>>,
+        docstring: Option<impl Into<String>>,
+    ) -> Self
+    where
+        F: Fn(Value) -> std::result::Result<Value, ERPCError> + Send + Sync + 'static,
+    {
+        ValueHandler {
+            func: Box::new(func),
+            info: MethodInfo::new(name, arg_spec, docstring),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl MethodHandler for ValueHandler {
+    async fn call(&self,
+        args: Value,
+    ) -> std::result::Result<Value, ERPCError> {
+        (self.func)(args)
+    }
+    
+    fn info(&self) -> MethodInfo {
+        self.info.clone()
+    }
+}
+
 /// Thread-safe method registry
 #[derive(Default)]
 pub struct MethodRegistry {
@@ -172,6 +208,29 @@ impl MethodRegistry {
         Ok(methods.values()
             .map(|handler| handler.info())
             .collect())
+    }
+
+    /// Register a method that accepts Value directly (for maximum flexibility)
+    pub async fn register_value_method<F>(
+        &self,
+        name: impl Into<String>,
+        func: F,
+        arg_spec: Option<impl Into<String>>,
+        docstring: Option<impl Into<String>>,
+    ) -> std::result::Result<(), crate::error::ERPCError>
+    where
+        F: Fn(Value) -> std::result::Result<Value, ERPCError> + Send + Sync + 'static,
+    {
+        let name = name.into();
+        let handler = Arc::new(ValueHandler::new(
+            move |args| func(args),
+            name.clone(),
+            arg_spec,
+            docstring,
+        ));
+        
+        self.methods.write().await.insert(name, handler);
+        Ok(())
     }
 
     /// Remove a method

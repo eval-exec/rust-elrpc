@@ -158,7 +158,7 @@ impl Server {
         Ok(())
     }
 
-    /// Register a method with closure
+    /// Register a method with closure (typed arguments)
     pub async fn register_method<F, Args, Ret>(
         &self,
         name: impl Into<String>,
@@ -172,6 +172,17 @@ impl Server {
         Ret: Serialize + Send,
     {
         self.registry.register_closure(name, func, arg_spec, docstring).await
+    }
+
+    /// Register a method that accepts Value directly (for maximum flexibility)
+    pub async fn register_value_method(
+        &self,
+        name: impl Into<String>,
+        func: impl Fn(Value) -> std::result::Result<Value, ERPCError> + Send + Sync + 'static,
+        arg_spec: Option<impl Into<String>>,
+        docstring: Option<impl Into<String>>,
+    ) -> std::result::Result<(), ERPCError> {
+        self.registry.register_value_method(name, func, arg_spec, docstring).await
     }
 
     /// Print the port number to stdout (for Emacs compatibility)

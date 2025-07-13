@@ -41,6 +41,9 @@ pub enum ERPCError {
     
     #[error("process error: {0}")]
     ProcessError(String),
+
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 pub type Result<T> = std::result::Result<T, ERPCError>;
