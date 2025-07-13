@@ -3,6 +3,11 @@ use lexpr::Value;
 use tokio::signal;
 use tracing_subscriber;
 
+fn subtraction(args: (i64, i64)) -> Result<i64> {
+    let (big, small) = args;
+    Ok(big - small)
+}
+
 fn add(args: Value) -> Result<Value> {
     args.as_slice()
         .ok_or_else(|| {
@@ -45,6 +50,16 @@ async fn main() -> Result<()> {
     // Register add method (using Value directly)
     server
         .register_value_method("add", add, Some("numbers..."), Some("Add list of numbers"))
+        .await?;
+
+    // Register subtraction method (typed version)
+    server
+        .register_method(
+            "subtraction",
+            subtraction,
+            Some("big small"),
+            Some("Subtract small from big"),
+        )
         .await?;
 
     // Print port for Emacs compatibility
